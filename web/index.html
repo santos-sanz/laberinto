@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LABERINTO // Race Control</title>
+  <link rel="stylesheet" href="/static/styles.css?v=0.1.0">
+</head>
+<body>
+  <div class="present-bar" id="present-bar">
+    <div class="present-brand">
+      <span class="brand-mark small">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h18v18H3zM7 3v6h4V5h6v4h-4v4h8v6h-6v-4H7v4H3v-8h4V9H3z" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+      </span>
+      <div><strong>LABERINTO</strong><span>Race Control</span></div>
+    </div>
+    <div class="present-actions">
+      <button id="present-start" class="ghost small">Iniciar carrera</button>
+      <button id="present-replay" class="ghost small" disabled>Repetir ruta</button>
+      <button id="present-reset" class="ghost small" disabled>Reiniciar</button>
+      <button id="present-fullscreen" class="ghost small">Pantalla completa</button>
+      <button id="present-exit" class="ghost small">Salir</button>
+    </div>
+  </div>
+
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h18v18H3zM7 3v6h4V5h6v4h-4v4h8v6h-6v-4H7v4H3v-8h4V9H3z" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+        </span>
+        <div class="brand-copy">
+          <h1>LABERINTO</h1>
+          <p>Carrera de modelos · texto vs decisiones</p>
+        </div>
+      </div>
+      <div class="status-strip">
+        <div class="key-status" id="key-nam">
+          <span class="status-dot"></span>
+          <div><strong>Nam</strong><span>comprobando…</span></div>
+        </div>
+        <div class="key-status" id="key-openrouter">
+          <span class="status-dot"></span>
+          <div><strong>OpenRouter</strong><span>comprobando…</span></div>
+        </div>
+        <button id="present" class="ghost small" title="Modo presentación (F)">Presentar</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <section class="panel controls">
+          <div class="section-head">
+            <div>
+              <span class="eyebrow">Circuito</span>
+              <h2>Laberinto</h2>
+            </div>
+            <button id="new-maze" class="ghost tiny">Nuevo</button>
+          </div>
+
+          <div class="mini-maze">
+            <canvas id="preview-canvas" aria-label="Vista previa del laberinto"></canvas>
+            <div class="preview-badge" id="preview-badge">semilla 42</div>
+          </div>
+
+          <div class="size-row">
+            <label class="field">
+              <span>Columnas</span>
+              <input id="width" type="number" min="5" max="31" value="13">
+            </label>
+            <label class="field">
+              <span>Filas</span>
+              <input id="height" type="number" min="5" max="31" value="13">
+            </label>
+            <label class="field">
+              <span>Semilla</span>
+              <input id="seed" type="number" value="42">
+            </label>
+          </div>
+
+          <div class="ground-truth" id="preview-stats">
+            <span class="eyebrow">Solver exacto</span>
+            <div class="gt-line"><span class="spinner tiny"></span> analizando…</div>
+          </div>
+        </section>
+
+        <section class="panel controls">
+          <div class="section-head">
+            <div>
+              <span class="eyebrow">Contendientes</span>
+              <h2>Modelos</h2>
+            </div>
+          </div>
+          <label class="field">
+            <span>Texto · Nam</span>
+            <select id="text-model"></select>
+          </label>
+          <label class="field">
+            <span>Decisiones · OpenRouter</span>
+            <select id="decisions-model"></select>
+          </label>
+          <div class="mini-grid">
+            <label class="field">
+              <span>Intentos texto</span>
+              <input id="attempts" type="number" min="1" max="5" value="2">
+            </label>
+            <label class="field">
+              <span>Llamadas decisión</span>
+              <input id="budget" type="number" min="0" max="500" value="80">
+            </label>
+            <label class="switch inline">
+              <input type="checkbox" id="baseline">
+              <span>Carril control</span>
+            </label>
+          </div>
+        </section>
+
+        <div class="actions">
+          <button id="start" class="start">Iniciar carrera</button>
+          <button id="cancel" class="cancel" disabled>Cancelar</button>
+          <button id="reset" class="reset" disabled>Reiniciar</button>
+        </div>
+        <p class="hint" id="hint">
+          El carril de texto pide la ruta completa a Nam. El de decisiones navega cruce a cruce con
+          OpenRouter; el harness retrocede en los callejones sin salida.
+        </p>
+      </aside>
+
+      <section class="arena">
+        <div class="race-head panel">
+          <div>
+            <span class="eyebrow">Circuito actual</span>
+            <div class="race-meta" id="race-meta">13 × 13 · semilla 42 · ruta óptima 42 pasos</div>
+          </div>
+          <div class="race-head-right">
+            <label class="switch inline">
+              <input type="checkbox" id="show-optimal" checked>
+              <span>Ruta óptima</span>
+            </label>
+            <button id="replay" class="ghost small" disabled>Repetir ruta</button>
+            <div class="race-clock" id="race-clock">00:00.000</div>
+          </div>
+        </div>
+
+        <div class="lanes" id="lanes">
+          <div class="empty-state" id="empty-state">
+            <span class="eyebrow">Sin carrera</span>
+            <h2>Elige el laberinto, dos modelos y pulsa iniciar.</h2>
+            <p>
+              Verás cada token avanzar en vivo. Los dos carriles usan el mismo laberinto y el mismo
+              reloj; gana la primera ruta verificada.
+            </p>
+          </div>
+        </div>
+
+        <div class="compare" id="compare"></div>
+
+        <div class="lower">
+          <section class="panel log-panel">
+            <div class="section-head">
+              <div><span class="eyebrow">En vivo</span><h2>Registro de eventos</h2></div>
+            </div>
+            <div class="event-log" id="event-log"><p class="muted">Esperando una carrera…</p></div>
+          </section>
+          <section class="panel history-panel">
+            <div class="section-head">
+              <div><span class="eyebrow">Archivo</span><h2>Carreras recientes</h2></div>
+              <button id="refresh-history" class="ghost tiny">Actualizar</button>
+            </div>
+            <div class="history" id="history"><p class="muted">Sin carreras guardadas.</p></div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js?v=0.1.0"></script>
+</body>
+</html>
