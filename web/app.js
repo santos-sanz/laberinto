@@ -222,8 +222,8 @@
   }
 
   async function loadMazePreview() {
-    const width = intValue("#width", 13, 5, 31);
-    const height = intValue("#height", 13, 5, 31);
+    const width = intValue("#width", 31, 5, 31);
+    const height = intValue("#height", 31, 5, 31);
     const seed = intValue("#seed", 42, 0, 2147483647);
     $("#width").value = width;
     $("#height").value = height;
@@ -307,8 +307,8 @@
   // -------------------------------------------------------------------------
 
   function collectRaceConfig() {
-    const width = intValue("#width", 13, 5, 31);
-    const height = intValue("#height", 13, 5, 31);
+    const width = intValue("#width", 31, 5, 31);
+    const height = intValue("#height", 31, 5, 31);
     const seed = intValue("#seed", 42, 0, 2147483647);
     const textModel = $("#text-model").value;
     const decisionsModel = $("#decisions-model").value;
