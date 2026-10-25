@@ -6,6 +6,7 @@ from maze.game import (
     DELTAS,
     OPPOSITE,
     WALL_BITS,
+    Maze,
     generate_maze,
     moves_to_path,
     shortest_path,
@@ -77,6 +78,17 @@ def test_verify_rejects_bad_start_goal_and_jump() -> None:
     assert not verify_path(maze, [[0, 0], [0, 0]]).ok
     assert not verify_path(maze, [[0, 0]]).ok
     assert not verify_path(maze, [[0, 0], [5, 5]]).ok
+
+
+def test_supports_255x255_and_serialises_compact_walls() -> None:
+    maze = generate_maze(255, 255, 42)
+    assert maze.cell_count == 65025
+    path = shortest_path(maze)
+    assert len(path) > 1
+    payload = maze.to_dict(include_solution=True)
+    assert isinstance(payload["walls"], str)
+    assert payload["ascii"] is None
+    assert Maze.from_dict(payload) == maze
 
 
 def test_moves_to_path_supports_words_and_symbols() -> None:

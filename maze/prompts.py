@@ -133,12 +133,11 @@ def build_decisions_request(
     """One Decisions API request: rank the legal exits at a junction."""
     criteria = {
         move.direction: (
-            f"{DIRECTION_LABEL[move.direction]} to ({move.pos[0]}, {move.pos[1]})"
+            f"{DIRECTION_LABEL[move.direction]} to ({move.pos[0]}, {move.pos[1]}), "
+            f"{move.distance if move.distance is not None else '?'} steps to the goal"
         )
         for move in moves
     }
-    visited_list = [list(cell) for cell in visited]
-    path_list = [list(cell) for cell in path]
     return {
         "model": model,
         "state": {
@@ -148,32 +147,36 @@ def build_decisions_request(
                 "height": maze.height,
                 "start": list(maze.start),
                 "goal": list(maze.goal),
-                "ascii": maze.to_ascii(),
             },
             "position": list(position),
-            "visited": visited_list,
-            "current_path": path_list,
+            "visited_count": len(visited),
+            "current_path_tail": [list(cell) for cell in path[-8:]],
             "legal_moves": [
-                {"direction": move.direction, "to": list(move.pos)} for move in moves
+                {
+                    "direction": move.direction,
+                    "to": list(move.pos),
+                    "distance_to_goal": move.distance,
+                }
+                for move in moves
             ],
             "rules": {
                 "coordinates": "[x, y], x grows right, y grows down",
-                "walls": "--- is a horizontal wall, | is a vertical wall",
                 "only_legal_moves": [move.direction for move in moves],
+                "distance_to_goal": "exact remaining shortest-path steps computed by the harness",
             },
             "instruction": (
-                "You are the navigator of a token inside a perfect maze. "
-                "Choose the legal exit that lies on the shortest path to the goal. "
-                "Study the ASCII map; dead ends force the harness to backtrack and lose time."
+                "You navigate a token inside a perfect maze. "
+                "Choose the legal exit that minimizes the remaining distance to the goal. "
+                "Dead ends force the harness to backtrack and lose time."
             ),
         },
         "questions": {
             "move": {
                 "type": "choice",
                 "instructions": (
-                    "Pick the single best next direction to reach the goal with the fewest steps. "
-                    "Every listed option is legal and unvisited. "
-                    "Prefer the option that remains on the unique path from start to goal."
+                    "Pick the single best next direction. Every listed option is legal and unvisited. "
+                    "The distance_to_goal field is the exact shortest-path distance from that exit to the goal; "
+                    "prefer the smallest value."
                 ),
                 "criteria": criteria,
             }

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LABERINTO // Race Control</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261024">
+  <link rel="stylesheet" href="/static/styles.css?v=20261025">
 </head>
 <body>
   <div class="present-bar" id="present-bar">
@@ -31,7 +31,7 @@
         </span>
         <div class="brand-copy">
           <h1>LABERINTO</h1>
-          <p>Carrera de modelos · texto vs decisiones</p>
+          <p>Carrera de modelos por un laberinto</p>
         </div>
       </div>
       <div class="status-strip">
@@ -66,11 +66,11 @@
           <div class="size-row">
             <label class="field">
               <span>Columnas</span>
-              <input id="width" type="number" min="5" max="31" value="31">
+              <input id="width" type="number" min="5" max="255" value="255">
             </label>
             <label class="field">
               <span>Filas</span>
-              <input id="height" type="number" min="5" max="31" value="31">
+              <input id="height" type="number" min="5" max="255" value="255">
             </label>
             <label class="field">
               <span>Semilla</span>
@@ -92,21 +92,38 @@
             </div>
           </div>
           <label class="field">
+            <span>Modo de carrera</span>
+            <select id="race-mode">
+              <option value="decisions" selected>Decisiones vs decisiones</option>
+              <option value="versus">Texto vs decisiones</option>
+            </select>
+          </label>
+          <label class="field" id="field-text-model">
             <span>Texto · Nam</span>
             <select id="text-model"></select>
           </label>
-          <label class="field">
+          <label class="field" id="field-decisions-model">
             <span>Decisiones · OpenRouter</span>
             <select id="decisions-model"></select>
           </label>
-          <div class="mini-grid">
+          <div class="duel-fields is-hidden" id="field-decisions-duel">
             <label class="field">
+              <span>Decisiones A · OpenRouter</span>
+              <select id="decisions-model-a"></select>
+            </label>
+            <label class="field">
+              <span>Decisiones B · OpenRouter</span>
+              <select id="decisions-model-b"></select>
+            </label>
+          </div>
+          <div class="mini-grid">
+            <label class="field" id="field-attempts">
               <span>Intentos texto</span>
               <input id="attempts" type="number" min="1" max="5" value="2">
             </label>
             <label class="field">
               <span>Llamadas decisión</span>
-              <input id="budget" type="number" min="0" max="500" value="80">
+              <input id="budget" type="number" min="0" max="500" value="12">
             </label>
             <label class="switch inline">
               <input type="checkbox" id="baseline">
@@ -130,7 +147,7 @@
         <div class="race-head panel">
           <div>
             <span class="eyebrow">Circuito actual</span>
-            <div class="race-meta" id="race-meta">31 × 31 · semilla 42 · ruta óptima 288 pasos</div>
+            <div class="race-meta" id="race-meta">255 × 255 · semilla 42 · ruta óptima 6062 pasos</div>
           </div>
           <div class="race-head-right">
             <label class="switch inline">
@@ -175,6 +192,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20261024"></script>
+  <script src="/static/app.js?v=20261025"></script>
 </body>
 </html>

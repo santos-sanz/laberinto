@@ -7,10 +7,10 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from .config import HEURISTIC_MODEL, RESULTS_DIR
+from .config import GROUND_TRUTH_SOLUTION_MAX_CELLS, PUBLIC_VISITED_LIMIT, RESULTS_DIR
 from .game import Maze, distance_map, generate_maze, shortest_path
-from .models import RaceConfig, decisions_provider, new_lane, now_iso
-from .runners import HeuristicPolicy, policy_for, run_decisions_lane, run_text_lane
+from .models import RaceConfig, new_lane, now_iso
+from .runners import HeuristicPolicy, policy_for_model, run_decisions_lane, run_text_lane
 
 RACES_DIR = RESULTS_DIR / "races"
 
@@ -18,18 +18,28 @@ RACES_DIR = RESULTS_DIR / "races"
 def analyse_maze(maze: Maze) -> dict[str, Any]:
     solution = shortest_path(maze)
     distances = distance_map(maze)
+    include_solution = maze.cell_count <= GROUND_TRUTH_SOLUTION_MAX_CELLS
     return {
         "solvable": bool(solution),
-        "solution": [list(cell) for cell in solution],
+        "solution": [list(cell) for cell in solution] if include_solution else None,
+        "solution_omitted": not include_solution,
         "optimal_steps": len(solution) - 1 if solution else None,
         "reachable_cells": len(distances),
     }
 
 
 def _public_lane(lane: dict[str, Any]) -> dict[str, Any]:
-    public = copy.deepcopy(lane)
+    trimmed = dict(lane)
+    visited = trimmed.get("visited") or []
+    if len(visited) > PUBLIC_VISITED_LIMIT:
+        trimmed["visited"] = []
+    public = copy.deepcopy(trimmed)
     public.pop("raw", None)
+    if len(public.get("trail") or []) > 1200:
+        public["trail"] = public["trail"][-1200:]
     public["trace"] = public.get("trace", [])[-100:]
+    if isinstance(public.get("verification"), dict):
+        public["verification"].pop("path", None)
     for attempt in public.get("attempts", []):
         attempt["content"] = (attempt.get("content") or "")[:4000]
         attempt["reasoning"] = (attempt.get("reasoning") or "")[:2000]
@@ -42,16 +52,18 @@ def _live_winner(race: dict[str, Any]) -> str | None:
     if race.get("status") in ("cancelled", "error"):
         return None
     eligible = [
-        lane
+        (key, lane)
         for key, lane in race["lanes"].items()
-        if key in ("text", "decisions") and lane.get("status") == "solved" and lane.get("elapsed_ms")
+        if lane.get("kind") != "baseline"
+        and lane.get("status") == "solved"
+        and lane.get("elapsed_ms")
     ]
     if not eligible:
         return None
-    eligible.sort(key=lambda lane: lane["elapsed_ms"])
-    if len(eligible) > 1 and abs(eligible[0]["elapsed_ms"] - eligible[1]["elapsed_ms"]) < 1:
+    eligible.sort(key=lambda item: item[1]["elapsed_ms"])
+    if len(eligible) > 1 and abs(eligible[0][1]["elapsed_ms"] - eligible[1][1]["elapsed_ms"]) < 1:
         return "tie"
-    return eligible[0]["kind"]
+    return eligible[0][0]
 
 
 def _public_race(race: dict[str, Any]) -> dict[str, Any]:
@@ -63,28 +75,55 @@ def _public_race(race: dict[str, Any]) -> dict[str, Any]:
 
 def _summary(race: dict[str, Any]) -> dict[str, Any]:
     lanes = race["lanes"]
+    lane_summaries = {}
+    for key, lane in lanes.items():
+        solution = lane.get("solution") or {}
+        lane_summaries[key] = {
+            "kind": lane.get("kind"),
+            "label": lane.get("label") or key,
+            "model": lane.get("model"),
+            "status": lane.get("status"),
+            "elapsed_ms": lane.get("elapsed_ms"),
+            "steps": solution.get("steps"),
+            "efficiency": solution.get("efficiency"),
+            "rate_limited": bool((lane.get("stats") or {}).get("rate_limited")),
+        }
+    winner = race.get("winner")
+    winner_label = "empate" if winner == "tie" else lane_summaries.get(winner, {}).get("label")
+    winner_ms = lane_summaries.get(winner, {}).get("elapsed_ms") if winner else None
+
+    solved = [
+        (key, lane)
+        for key, lane in lanes.items()
+        if lane.get("kind") != "baseline"
+        and lane.get("status") == "solved"
+        and lane.get("elapsed_ms")
+    ]
+    solved.sort(key=lambda item: item[1]["elapsed_ms"])
+    first_decisions = next(
+        (lane for lane in lanes.values() if lane.get("kind") == "decisions"), {}
+    )
     result: dict[str, Any] = {
-        "winner": race.get("winner"),
-        "text_ms": lanes["text"].get("elapsed_ms"),
-        "decisions_ms": lanes["decisions"].get("elapsed_ms"),
+        "winner": winner,
+        "winner_label": winner_label,
+        "winner_ms": winner_ms,
+        "lanes": lane_summaries,
+        "text_ms": lanes.get("text", {}).get("elapsed_ms"),
+        "decisions_ms": first_decisions.get("elapsed_ms"),
         "baseline_ms": lanes.get("baseline", {}).get("elapsed_ms"),
-        "text_status": lanes["text"].get("status"),
-        "decisions_status": lanes["decisions"].get("status"),
+        "text_status": lanes.get("text", {}).get("status"),
+        "decisions_status": first_decisions.get("status"),
         "baseline_status": lanes.get("baseline", {}).get("status"),
         "delta_ms": None,
         "speedup": None,
     }
-    text_ms = lanes["text"].get("elapsed_ms")
-    decisions_ms = lanes["decisions"].get("elapsed_ms")
-    if (
-        text_ms
-        and decisions_ms
-        and lanes["text"].get("status") == "solved"
-        and lanes["decisions"].get("status") == "solved"
-    ):
-        result["delta_ms"] = round(decisions_ms - text_ms, 1)
-        if decisions_ms > 0:
-            result["speedup"] = round(text_ms / decisions_ms, 3)
+    if len(solved) >= 2:
+        first, second = solved[0][1], solved[1][1]
+        result["delta_ms"] = round(second["elapsed_ms"] - first["elapsed_ms"], 1)
+        if second["elapsed_ms"] > 0:
+            result["speedup"] = round(first["elapsed_ms"] / second["elapsed_ms"], 3)
+    if winner == "tie" and solved:
+        result["winner_ms"] = solved[0][1]["elapsed_ms"]
     return result
 
 
@@ -109,22 +148,15 @@ class RaceManager:
             "maze": maze.to_dict(include_solution=False),
             "ground_truth": ground_truth,
             "lanes": {
-                "text": new_lane("text", config.text_model, "Nam", maze.start),
-                "decisions": new_lane(
-                    "decisions",
-                    config.decisions_model,
-                    decisions_provider(config.decisions_model),
-                    maze.start,
-                ),
+                spec["key"]: new_lane(
+                    spec["kind"], spec["model"], spec["provider"], maze.start, spec["label"]
+                )
+                for spec in config.lane_specs()
             },
             "winner": None,
             "events": [],
             "summary": None,
         }
-        if config.include_baseline and config.decisions_model != HEURISTIC_MODEL:
-            race["lanes"]["baseline"] = new_lane(
-                "baseline", HEURISTIC_MODEL, "Harness", maze.start
-            )
         self.races[race_id] = race
         return _public_race(race)
 
@@ -161,14 +193,30 @@ class RaceManager:
         optimal_steps = len(solution) - 1
         lanes = race["lanes"]
 
-        tasks = [
-            run_text_lane(config, maze, lanes["text"], optimal_steps),
-            run_decisions_lane(config, maze, lanes["decisions"], policy_for(config), source="decisions"),
-        ]
-        if "baseline" in lanes:
-            tasks.append(
-                run_decisions_lane(config, maze, lanes["baseline"], HeuristicPolicy(), source="baseline")
-            )
+        tasks = []
+        for key, lane in lanes.items():
+            if lane["kind"] == "text":
+                tasks.append(run_text_lane(config, maze, lane, optimal_steps))
+            elif lane["kind"] == "decisions":
+                tasks.append(
+                    run_decisions_lane(
+                        config,
+                        maze,
+                        lane,
+                        policy_for_model(lane["model"]),
+                        source=key,
+                    )
+                )
+            elif lane["kind"] == "baseline":
+                tasks.append(
+                    run_decisions_lane(
+                        config,
+                        maze,
+                        lane,
+                        HeuristicPolicy(),
+                        source=key,
+                    )
+                )
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
@@ -184,22 +232,27 @@ class RaceManager:
             return
 
         eligible = [
-            lane
+            (key, lane)
             for key, lane in lanes.items()
-            if key in ("text", "decisions") and lane["status"] == "solved" and lane["elapsed_ms"]
+            if lane["kind"] != "baseline"
+            and lane["status"] == "solved"
+            and lane["elapsed_ms"]
         ]
         if eligible:
-            fastest = min(eligible, key=lambda lane: lane["elapsed_ms"])
-            race["winner"] = fastest["kind"]
+            fastest_key, fastest = min(eligible, key=lambda item: item[1]["elapsed_ms"])
+            race["winner"] = fastest_key
             if len(eligible) > 1:
-                first, second = sorted(eligible, key=lambda lane: lane["elapsed_ms"])[:2]
-                if abs(first["elapsed_ms"] - second["elapsed_ms"]) < 1:
+                first, second = sorted(eligible, key=lambda item: item[1]["elapsed_ms"])[:2]
+                if abs(first[1]["elapsed_ms"] - second[1]["elapsed_ms"]) < 1:
                     race["winner"] = "tie"
         race["status"] = "done"
         race["finished_at"] = now_iso()
         race["summary"] = _summary(race)
         race["events"].append(
-            {"at": race["finished_at"], "message": f"carrera terminada: {race['winner'] or 'sin ganador'}"}
+            {
+                "at": race["finished_at"],
+                "message": f"carrera terminada: {race['summary'].get('winner_label') or 'sin ganador'}",
+            }
         )
         self._save(race)
 
