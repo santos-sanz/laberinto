@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, Sequence
 
 from .clients import NamClient, OpenRouterDecisionsClient, ProviderError
-from .config import HEURISTIC_MODEL, TEXT_MAX_TOKENS
+from .config import HEURISTIC_MODEL, PUBLIC_VISITED_LIMIT, TEXT_MAX_CELLS, TEXT_MAX_TOKENS
 from .game import (
     DIRECTION_LABEL,
     DIRECTIONS,
@@ -96,6 +96,18 @@ async def run_text_lane(
     started = time.perf_counter()
     lane["started_at"] = now_iso()
     lane["status"] = "running"
+
+    if maze.cell_count > TEXT_MAX_CELLS:
+        message = (
+            f"laberinto {maze.width}×{maze.height} ({maze.cell_count} celdas): "
+            f"el carril de texto solo admite hasta {TEXT_MAX_CELLS} celdas. "
+            "Usa el modo decisiones o un laberinto más pequeño."
+        )
+        lane["verification"] = _error_verification(message, optimal_steps).to_dict()
+        trace(lane, message)
+        _finish_lane(lane, started, "unsolved")
+        return
+
     trace(lane, f"abriendo carril de texto con {config.text_model}")
 
     feedback: str | None = None
@@ -296,10 +308,14 @@ class HeuristicPolicy:
         return Selection(probabilities=_normalise(weights))
 
 
-def policy_for(config: RaceConfig) -> MovePolicy:
-    if config.decisions_model == HEURISTIC_MODEL:
+def policy_for_model(model: str) -> MovePolicy:
+    if model == HEURISTIC_MODEL:
         return HeuristicPolicy()
-    return OpenRouterPolicy(config.decisions_model)
+    return OpenRouterPolicy(model)
+
+
+def policy_for(config: RaceConfig) -> MovePolicy:
+    return policy_for_model(config.decisions_model)
 
 
 def _ranked_moves(
@@ -333,7 +349,7 @@ async def run_decisions_lane(
     started = time.perf_counter()
     lane["started_at"] = now_iso()
     lane["status"] = "running"
-    trace(lane, f"abriendo carril {source} con {lane['model']}")
+    trace(lane, f"abriendo carril {lane.get('label') or source} con {lane['model']}")
 
     distances = distance_map(maze)
     position = maze.start
@@ -343,18 +359,28 @@ async def run_decisions_lane(
     stats = lane["stats"]
     stats["optimal_steps"] = None
     calls = 0
+    rate_limited = False
     steps = 0
     last_trace_step = 0
+    last_published_step = -1
+    publish_interval = 1 if maze.cell_count <= PUBLIC_VISITED_LIMIT else 25
+    baseline_pace = 0.012 if maze.cell_count <= PUBLIC_VISITED_LIMIT else 0.0
 
-    def publish() -> None:
+    def publish(force: bool = False) -> None:
+        nonlocal last_published_step
         lane["position"] = list(position)
-        lane["path"] = [list(cell) for cell in path]
-        lane["trail"] = [list(cell) for cell in trail[-1200:]]
-        lane["visited"] = [list(cell) for cell in visited]
         stats["steps"] = steps
         stats["unique_cells"] = len(visited)
         stats["backtracks"] = max(0, len(trail) - len(path))
         stats["path_length"] = max(0, len(path) - 1)
+        if not force and steps - last_published_step < publish_interval:
+            return
+        lane["path"] = [list(cell) for cell in path]
+        lane["trail"] = [list(cell) for cell in trail[-1200:]]
+        lane["visited"] = (
+            [list(cell) for cell in visited] if len(visited) <= PUBLIC_VISITED_LIMIT else []
+        )
+        last_published_step = steps
 
     while position != maze.goal:
         if steps >= config.max_steps:
@@ -373,67 +399,80 @@ async def run_decisions_lane(
             if steps - last_trace_step >= 3:
                 trace(lane, f"callejón sin salida, retrocedo a {list(position)}")
                 last_trace_step = steps
-            if source == "baseline":
-                await asyncio.sleep(0.012)
+            if source == "baseline" and baseline_pace:
+                await asyncio.sleep(baseline_pace)
             continue
 
         if len(options) == 1:
             chosen = options[0]
         else:
             stats["junctions"] += 1
-            if calls >= config.max_junction_calls:
+            if rate_limited:
+                chosen = heuristic_order(maze, options)[0]
+            elif calls >= config.max_junction_calls:
                 chosen = heuristic_order(maze, options)[0]
                 trace(lane, f"presupuesto de decisiones agotado en {list(position)}; uso la heurística")
             else:
+                selection = None
                 try:
                     selection = await policy.select(maze, position, visited, path, options)
                 except ProviderError as exc:
-                    lane["error"] = str(exc)
-                    trace(lane, f"error del proveedor: {exc}")
-                    _finish_lane(lane, started, "error")
-                    return
+                    if exc.status == 429:
+                        rate_limited = True
+                        stats["rate_limited"] = True
+                        chosen = heuristic_order(maze, options)[0]
+                        trace(
+                            lane,
+                            "límite de peticiones del proveedor (429); continúo con la heurística",
+                        )
+                    else:
+                        lane["error"] = str(exc)
+                        trace(lane, f"error del proveedor: {exc}")
+                        _finish_lane(lane, started, "error")
+                        return
                 except Exception as exc:  # pragma: no cover - defensive
                     lane["error"] = f"unexpected error: {exc}"
                     trace(lane, lane["error"])
                     _finish_lane(lane, started, "error")
                     return
 
-                if selection.calls:
-                    lane["calls"] += selection.calls
-                    calls += selection.calls
-                    _accumulate(
-                        lane,
-                        selection.prompt_tokens,
-                        selection.completion_tokens,
-                        selection.total_tokens,
-                        selection.cost,
-                    )
-                    if selection.raw is not None:
-                        lane["raw"].append(
-                            {
-                                "position": list(position),
-                                "step": steps,
-                                "request": selection.raw.get("request"),
-                                "response": selection.raw.get("response"),
-                            }
+                if selection is not None:
+                    if selection.calls:
+                        lane["calls"] += selection.calls
+                        calls += selection.calls
+                        _accumulate(
+                            lane,
+                            selection.prompt_tokens,
+                            selection.completion_tokens,
+                            selection.total_tokens,
+                            selection.cost,
                         )
-                    trace(
-                        lane,
-                        f"decisión en {list(position)} en {round(selection.latency_ms)} ms",
-                        prompt_tokens=selection.prompt_tokens,
-                        options=len(options),
-                    )
+                        if selection.raw is not None:
+                            lane["raw"].append(
+                                {
+                                    "position": list(position),
+                                    "step": steps,
+                                    "request": selection.raw.get("request"),
+                                    "response": selection.raw.get("response"),
+                                }
+                            )
+                        trace(
+                            lane,
+                            f"decisión en {list(position)} en {round(selection.latency_ms)} ms",
+                            prompt_tokens=selection.prompt_tokens,
+                            options=len(options),
+                        )
 
-                ranked = _ranked_moves(options, selection.probabilities)
-                chosen = ranked[0]
-                if selection.probabilities:
-                    trace(
-                        lane,
-                        f"modelo elige {chosen.direction} desde {list(position)}",
-                        probabilities={key: round(value, 3) for key, value in selection.probabilities.items()},
-                    )
-                else:
-                    trace(lane, "respuesta sin probabilidades; uso el orden heurístico")
+                    ranked = _ranked_moves(options, selection.probabilities)
+                    chosen = ranked[0]
+                    if selection.probabilities:
+                        trace(
+                            lane,
+                            f"modelo elige {chosen.direction} desde {list(position)}",
+                            probabilities={key: round(value, 3) for key, value in selection.probabilities.items()},
+                        )
+                    else:
+                        trace(lane, "respuesta sin probabilidades; uso el orden heurístico")
 
         position = chosen.pos
         visited.add(position)
@@ -441,10 +480,13 @@ async def run_decisions_lane(
         trail.append(position)
         steps += 1
         publish()
-        if source == "baseline":
-            await asyncio.sleep(0.012)
+        if source == "baseline" and baseline_pace:
+            await asyncio.sleep(baseline_pace)
+        if steps % 400 == 0:
+            await asyncio.sleep(0)
 
     if position == maze.goal:
+        publish(force=True)
         reference = distance_map(maze)
         optimal_steps = reference.get(maze.start, 0)
         verification = verify_path(maze, path, optimal_steps)
@@ -466,6 +508,7 @@ async def run_decisions_lane(
                     "model_calls": calls,
                     "junctions": stats.get("junctions", 0),
                     "dead_ends_hit": stats.get("dead_ends_hit", 0),
+                    "rate_limited": stats.get("rate_limited", False),
                 },
             )
             trace(

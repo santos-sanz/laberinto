@@ -237,6 +237,10 @@ canvas { touch-action: none; }
 .size-row { display: grid; grid-template-columns: 1fr 1fr 1.15fr; gap: 8px; }
 
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.field + .field { margin-top: 9px; }
+.duel-fields { display: flex; flex-direction: column; gap: 9px; margin-top: 9px; }
+.duel-fields .field + .field { margin-top: 0; }
+.is-hidden { display: none !important; }
 .field > span {
   color: var(--muted);
   font-family: var(--mono);
@@ -678,7 +682,7 @@ button:not(:disabled):active { transform: translateY(1px); }
 .compare-rows { display: flex; flex-direction: column; gap: 8px; }
 .compare-row {
   display: grid;
-  grid-template-columns: 96px minmax(0, 1fr) auto;
+  grid-template-columns: 112px minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
 }
@@ -884,6 +888,6 @@ body.present .empty-state { min-height: 60vh; }
   .status-strip { justify-content: flex-start; }
   .race-head { align-items: flex-start; flex-direction: column; }
   .race-head-right { width: 100%; justify-content: space-between; }
-  .compare-row { grid-template-columns: 74px minmax(0, 1fr) auto; }
+  .compare-row { grid-template-columns: 84px minmax(0, 1fr) auto; }
   .present-bar { align-items: flex-start; flex-direction: column; }
 }

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
 import random
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
+
+from .config import MAZE_ASCII_MAX_CELLS
 
 Coord = tuple[int, int]
 
@@ -99,10 +102,11 @@ class Maze:
             "width": self.width,
             "height": self.height,
             "seed": self.seed,
-            "walls": list(self.walls),
+            "walls": pack_walls(self.walls),
+            "walls_encoding": "base64-nibbles",
             "start": list(self.start),
             "goal": list(self.goal),
-            "ascii": self.to_ascii(),
+            "ascii": self.to_ascii() if self.cell_count <= MAZE_ASCII_MAX_CELLS else None,
             "cells": self.cell_count,
         }
         if include_solution:
@@ -115,20 +119,48 @@ class Maze:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Maze":
+        width = int(data["width"])
+        height = int(data["height"])
+        raw_walls = data["walls"]
+        walls = (
+            unpack_walls(raw_walls, width * height)
+            if isinstance(raw_walls, str)
+            else list(raw_walls)
+        )
         return cls(
-            width=int(data["width"]),
-            height=int(data["height"]),
+            width=width,
+            height=height,
             seed=int(data.get("seed", 0)),
-            walls=tuple(int(value) for value in data["walls"]),
+            walls=tuple(int(value) for value in walls),
         )
 
 
-def generate_maze(width: int = 13, height: int = 13, seed: int | None = None) -> Maze:
+def pack_walls(walls: Sequence[int]) -> str:
+    data = bytearray((len(walls) + 1) // 2)
+    for index, value in enumerate(walls):
+        nibble = int(value) & 0x0F
+        if index % 2 == 0:
+            data[index // 2] = nibble
+        else:
+            data[index // 2] |= nibble << 4
+    return base64.b64encode(bytes(data)).decode("ascii")
+
+
+def unpack_walls(packed: str, count: int | None = None) -> list[int]:
+    raw = base64.b64decode(packed)
+    walls = []
+    for byte in raw:
+        walls.append(byte & 0x0F)
+        walls.append((byte >> 4) & 0x0F)
+    return walls[:count] if count is not None else walls
+
+
+def generate_maze(width: int = 255, height: int = 255, seed: int | None = None) -> Maze:
     """Carve a perfect maze with randomized depth-first search."""
     if width < 2 or height < 2:
         raise ValueError("maze must be at least 2x2")
-    if width > 41 or height > 41:
-        raise ValueError("maze cannot be larger than 41x41")
+    if width > 255 or height > 255:
+        raise ValueError("maze cannot be larger than 255x255")
     seed = random.randrange(0, 2**31) if seed is None else int(seed)
     rng = random.Random(seed)
     walls = [WALL_BITS["n"] | WALL_BITS["e"] | WALL_BITS["s"] | WALL_BITS["w"] for _ in range(width * height)]

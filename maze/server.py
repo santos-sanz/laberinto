@@ -32,8 +32,10 @@ class RaceRequest(BaseModel):
     width: int = config.DEFAULT_WIDTH
     height: int = config.DEFAULT_HEIGHT
     seed: int = config.DEFAULT_SEED
+    mode: str = config.DEFAULT_MODE
     text_model: str = config.DEFAULT_TEXT_MODEL
     decisions_model: str = config.DEFAULT_DECISIONS_MODEL
+    decisions_models: list[str] = Field(default_factory=list)
     text_max_attempts: int = config.DEFAULT_TEXT_ATTEMPTS
     max_junction_calls: int = config.DEFAULT_MAX_JUNCTION_CALLS
     include_baseline: bool = False
@@ -90,8 +92,10 @@ async def bootstrap() -> dict[str, Any]:
             "width": config.DEFAULT_WIDTH,
             "height": config.DEFAULT_HEIGHT,
             "seed": config.DEFAULT_SEED,
+            "mode": config.DEFAULT_MODE,
             "text_model": config.DEFAULT_TEXT_MODEL,
             "decisions_model": config.DEFAULT_DECISIONS_MODEL,
+            "decisions_models": list(config.DEFAULT_DECISION_CONTENDERS),
             "text_max_attempts": config.DEFAULT_TEXT_ATTEMPTS,
             "max_junction_calls": config.DEFAULT_MAX_JUNCTION_CALLS,
             "include_baseline": False,
@@ -101,8 +105,8 @@ async def bootstrap() -> dict[str, Any]:
 
 @app.get("/api/maze")
 async def get_maze(
-    width: int = Query(default=config.DEFAULT_WIDTH, ge=5, le=31),
-    height: int = Query(default=config.DEFAULT_HEIGHT, ge=5, le=31),
+    width: int = Query(default=config.DEFAULT_WIDTH, ge=5, le=config.MAX_MAZE_SIZE),
+    height: int = Query(default=config.DEFAULT_HEIGHT, ge=5, le=config.MAX_MAZE_SIZE),
     seed: int | None = None,
 ) -> dict[str, Any]:
     actual_seed = random.randrange(0, 2**31) if seed is None else int(seed)

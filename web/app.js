@@ -4,10 +4,9 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
-  const LANE_COLORS = { text: "#f5a524", decisions: "#38d6f5", baseline: "#9b8cff" };
+  const LANE_PALETTE = ["#38d6f5", "#9b8cff", "#39d69d", "#ff617d"];
   const LANE_GLYPHS = { text: "T", decisions: "D", baseline: "C" };
   const LANE_LABELS = { text: "Texto", decisions: "Decisiones", baseline: "Control" };
-  const WINNER_LABELS = { text: "texto", decisions: "decisiones", tie: "empate" };
   const STATUS_LABELS = {
     waiting: "en espera",
     running: "en marcha",
@@ -41,6 +40,7 @@
     lastLogSignature: "",
     toastTimer: null,
     previewTimer: null,
+    wallCache: new Map(),
   };
 
   async function api(path, options = {}) {
@@ -96,6 +96,26 @@
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;")
       .replaceAll("'", "&#39;");
+  }
+
+  function laneAccent(key, lane) {
+    if (key === "text" || lane?.kind === "text") return "#f5a524";
+    if (key === "baseline" || lane?.kind === "baseline") return "#9b8cff";
+    if (key === "decisions") return "#38d6f5";
+    const match = /(\d+)$/.exec(key);
+    const index = match ? Math.max(0, Number.parseInt(match[1], 10) - 1) : 0;
+    return LANE_PALETTE[index % LANE_PALETTE.length];
+  }
+
+  function laneGlyph(key, lane) {
+    if (key === "text" || lane?.kind === "text") return "T";
+    if (key === "baseline" || lane?.kind === "baseline") return "C";
+    const match = /(\d+)$/.exec(key);
+    return match ? `D${match[1]}` : "D";
+  }
+
+  function laneLabel(key, lane) {
+    return lane?.label || LANE_LABELS[lane?.kind] || LANE_LABELS[key] || key;
   }
 
   function hexToRgba(hex, alpha) {
@@ -167,53 +187,89 @@
     $("span:last-child", el).textContent = `${label === "Nam" ? "" : ""}${status?.detail || "sin datos"}`;
   }
 
-  function populateModels(data) {
-    const textSelect = $("#text-model");
-    const decisionSelect = $("#decisions-model");
-    const textCurrent = textSelect.value;
-    const decisionCurrent = decisionSelect.value;
+  function fillSelect(select, models, selected, fallback) {
+    select.innerHTML = "";
+    for (const model of models) {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = model.name;
+      select.appendChild(option);
+    }
+    const target = models.some((model) => model.id === selected) ? selected : models[0]?.id || fallback;
+    select.value = target || "";
+  }
 
+  function populateModels(data) {
     const textModels = (data.nam_models || []).map((model) => ({ id: model.id, name: model.id }));
     if (!textModels.some((model) => model.id === data.defaults.text_model)) {
       textModels.unshift({ id: data.defaults.text_model, name: data.defaults.text_model });
     }
-    textSelect.innerHTML = "";
-    for (const model of textModels) {
-      const option = document.createElement("option");
-      option.value = model.id;
-      option.textContent = model.name;
-      textSelect.appendChild(option);
-    }
-    textSelect.value = textCurrent || data.defaults.text_model;
-
     const decisionModels = (data.decision_models || []).map((model) => ({
       id: model.id,
       name: model.name || model.id,
     }));
-    if (!decisionModels.some((model) => model.id === data.defaults.decisions_model)) {
-      decisionModels.unshift({
-        id: data.defaults.decisions_model,
-        name: data.defaults.decisions_model,
-      });
+    for (const modelId of [data.defaults.decisions_model, ...(data.defaults.decisions_models || [])]) {
+      if (modelId && !decisionModels.some((model) => model.id === modelId)) {
+        decisionModels.unshift({ id: modelId, name: modelId });
+      }
     }
     const heuristic = { id: data.heuristic_model, name: "Control heurístico (sin API)" };
     if (!decisionModels.some((model) => model.id === heuristic.id)) decisionModels.push(heuristic);
 
-    decisionSelect.innerHTML = "";
-    for (const model of decisionModels) {
-      const option = document.createElement("option");
-      option.value = model.id;
-      option.textContent = model.name;
-      decisionSelect.appendChild(option);
-    }
-    decisionSelect.value = decisionCurrent || data.defaults.decisions_model;
+    fillSelect($("#text-model"), textModels, $("#text-model").value || data.defaults.text_model, data.defaults.text_model);
+    fillSelect($("#decisions-model"), decisionModels, $("#decisions-model").value || data.defaults.decisions_model, data.defaults.decisions_model);
 
+    const contenders = (data.defaults.decisions_models || []).filter(Boolean);
+    const first = $("#decisions-model-a").value || contenders[0] || data.defaults.decisions_model;
+    const second =
+      $("#decisions-model-b").value ||
+      contenders[1] ||
+      decisionModels.map((model) => model.id).find((id) => id !== first) ||
+      first;
+    fillSelect($("#decisions-model-a"), decisionModels, first, first);
+    fillSelect($("#decisions-model-b"), decisionModels, second, second);
+
+    $("#race-mode").value = data.defaults.mode || "decisions";
     $("#width").value = data.defaults.width;
     $("#height").value = data.defaults.height;
     $("#seed").value = data.defaults.seed;
     $("#attempts").value = data.defaults.text_max_attempts;
     $("#budget").value = data.defaults.max_junction_calls;
     $("#baseline").checked = Boolean(data.defaults.include_baseline);
+    applyModeUI();
+  }
+
+  function applyModeUI() {
+    const decisionsMode = $("#race-mode").value === "decisions";
+    $("#field-text-model").classList.toggle("is-hidden", decisionsMode);
+    $("#field-attempts").classList.toggle("is-hidden", decisionsMode);
+    $("#field-decisions-model").classList.toggle("is-hidden", decisionsMode);
+    $("#field-decisions-duel").classList.toggle("is-hidden", !decisionsMode);
+    renderHint();
+  }
+
+  function renderHint(race = state.race) {
+    const hint = $("#hint");
+    if (state.archived) {
+      hint.textContent = "Estás viendo una carrera guardada. Reinicia para preparar la siguiente.";
+      return;
+    }
+    const running = Boolean(race && (race.status === "running" || race.status === "created"));
+    if (running) {
+      hint.textContent = "Carrera en curso. El reloj se detiene por carril cuando su ruta queda verificada.";
+      return;
+    }
+    if (race && race.status === "done") {
+      hint.textContent = "Carrera terminada. Repite las rutas o prepara un laberinto nuevo.";
+      return;
+    }
+    if ($("#race-mode").value === "decisions") {
+      hint.textContent =
+        "Dos modelos de decisiones navegan el mismo laberinto cruce a cruce. Gana la primera ruta verificada; el harness retrocede en los callejones sin salida.";
+    } else {
+      hint.textContent =
+        "El carril de texto pide la ruta completa a Nam (máximo 400 celdas). El de decisiones navega cruce a cruce con OpenRouter; el harness retrocede en los callejones sin salida.";
+    }
   }
 
   function schedulePreview() {
@@ -222,8 +278,8 @@
   }
 
   async function loadMazePreview() {
-    const width = intValue("#width", 31, 5, 31);
-    const height = intValue("#height", 31, 5, 31);
+    const width = intValue("#width", 255, 5, 255);
+    const height = intValue("#height", 255, 5, 255);
     const seed = intValue("#seed", 42, 0, 2147483647);
     $("#width").value = width;
     $("#height").value = height;
@@ -263,6 +319,27 @@
     }
   }
 
+  function winnerLabelForRace(race) {
+    if (race.summary?.winner_label) return race.summary.winner_label;
+    if (!race.winner) return "sin ganador";
+    if (race.winner === "tie") return "empate";
+    if (race.winner === "text") return "texto";
+    if (race.winner === "decisions") return "decisiones";
+    const match = /^decisions_(\d+)$/.exec(race.winner);
+    return match ? `decisiones ${match[1]}` : race.winner;
+  }
+
+  function winnerMsForRace(race) {
+    if (race.summary?.winner_ms != null) return race.summary.winner_ms;
+    if (race.winner === "tie") {
+      const times = Object.values(race.summary?.lanes || {})
+        .map((lane) => lane.elapsed_ms)
+        .filter((value) => value != null);
+      return times.length ? Math.min(...times) : null;
+    }
+    return race.summary?.lanes?.[race.winner]?.elapsed_ms ?? null;
+  }
+
   function renderHistory(races) {
     const container = $("#history");
     container.innerHTML = "";
@@ -278,20 +355,26 @@
       const main = document.createElement("div");
       const title = document.createElement("div");
       title.className = "h-title";
-      title.textContent = `${race.config.width}×${race.config.height} · semilla ${race.config.seed}`;
+      const modeTag = race.config.mode === "decisions" ? " · D vs D" : "";
+      title.textContent = `${race.config.width}×${race.config.height} · semilla ${race.config.seed}${modeTag}`;
       const sub = document.createElement("div");
       sub.className = "h-sub";
       const date = race.started_at || race.created_at;
-      const winner = WINNER_LABELS[race.winner] || "sin ganador";
-      sub.textContent = `${formatClock(date)} · ${winner}`;
+      sub.textContent = `${formatClock(date)} · ${winnerLabelForRace(race)}`;
       main.append(title, sub);
 
       const win = document.createElement("div");
-      win.className = `h-win ${race.winner || ""}`;
-      const textMs = race.summary?.text_ms;
-      const decisionMs = race.summary?.decisions_ms;
-      const short = (ms) => `${(ms / 1000).toFixed(1)}s`;
-      win.textContent = textMs && decisionMs ? `T ${short(textMs)} · D ${short(decisionMs)}` : STATUS_LABELS[race.status] || race.status;
+      const winnerClass =
+        race.winner === "tie"
+          ? "tie"
+          : String(race.winner || "").startsWith("decisions")
+            ? "decisions"
+            : race.winner === "text"
+              ? "text"
+              : "";
+      win.className = `h-win ${winnerClass}`;
+      const winnerMs = winnerMsForRace(race);
+      win.textContent = winnerMs != null ? `${(winnerMs / 1000).toFixed(1)}s` : STATUS_LABELS[race.status] || race.status;
 
       item.append(main, win);
       item.addEventListener("click", () => loadArchivedRace(race.id));
@@ -307,8 +390,8 @@
   // -------------------------------------------------------------------------
 
   function collectRaceConfig() {
-    const width = intValue("#width", 31, 5, 31);
-    const height = intValue("#height", 31, 5, 31);
+    const width = intValue("#width", 255, 5, 255);
+    const height = intValue("#height", 255, 5, 255);
     const seed = intValue("#seed", 42, 0, 2147483647);
     const textModel = $("#text-model").value;
     const decisionsModel = $("#decisions-model").value;
@@ -320,7 +403,7 @@
       text_model: textModel,
       decisions_model: decisionsModel,
       text_max_attempts: intValue("#attempts", 2, 1, 5),
-      max_junction_calls: intValue("#budget", 80, 0, 500),
+      max_junction_calls: intValue("#budget", 12, 0, 500),
       include_baseline: $("#baseline").checked,
     };
   }
@@ -531,30 +614,24 @@
     $("#width").disabled = running;
     $("#height").disabled = running;
     $("#seed").disabled = running;
+    $("#race-mode").disabled = running;
     $("#text-model").disabled = running;
     $("#decisions-model").disabled = running;
+    $("#decisions-model-a").disabled = running;
+    $("#decisions-model-b").disabled = running;
     $("#attempts").disabled = running;
     $("#budget").disabled = running;
     $("#baseline").disabled = running;
-
-    const hint = $("#hint");
-    if (state.archived) {
-      hint.textContent = "Estás viendo una carrera guardada. Reinicia para preparar la siguiente.";
-    } else if (running) {
-      hint.textContent = "Carrera en curso. El reloj se detiene por carril cuando su ruta queda verificada.";
-    } else if (hasRace && race.status === "done") {
-      hint.textContent = "Carrera terminada. Repite las rutas o prepara un laberinto nuevo.";
-    } else {
-      hint.textContent =
-        "El carril de texto pide la ruta completa a Nam. El de decisiones navega cruce a cruce con OpenRouter; el harness retrocede en los callejones sin salida.";
-    }
+    $("#show-optimal").disabled = Boolean(race && !race.ground_truth?.solution);
+    renderHint(race);
   }
 
   function renderRaceMeta(race, preview = state.preview) {
     const el = $("#race-meta");
     if (race) {
       const archived = state.archived ? " · archivo" : "";
-      el.textContent = `${race.config.width} × ${race.config.height} · semilla ${race.config.seed} · ruta óptima ${race.ground_truth.optimal_steps} pasos${archived}`;
+      const mode = race.config.mode === "decisions" ? " · duelo de decisiones" : " · texto vs decisiones";
+      el.textContent = `${race.config.width} × ${race.config.height} · semilla ${race.config.seed} · ruta óptima ${race.ground_truth.optimal_steps} pasos${mode}${archived}`;
     } else if (preview) {
       el.textContent = `${preview.width} × ${preview.height} · semilla ${preview.seed} · ruta óptima ${preview.optimal_steps} pasos`;
     } else {
@@ -569,7 +646,7 @@
   function createLaneNode(kind, lane) {
     const root = document.createElement("article");
     root.className = "lane";
-    root.dataset.kind = kind;
+    root.dataset.kind = lane.kind || kind;
     root.innerHTML = `
       <div class="lane-top">
         <div class="lane-identity">
@@ -616,9 +693,10 @@
       tokens: $('[data-ref="tokens"]', root),
       feed: $('[data-ref="feed"]', root),
     };
-    node.glyph.textContent = LANE_GLYPHS[kind] || "?";
-    node.root.style.setProperty("--accent", LANE_COLORS[kind] || "#8891a3");
-    node.root.style.setProperty("--accent-soft", hexToRgba(LANE_COLORS[kind] || "#8891a3", 0.12));
+    const accent = laneAccent(kind, lane);
+    node.glyph.textContent = laneGlyph(kind, lane);
+    node.root.style.setProperty("--accent", accent);
+    node.root.style.setProperty("--accent-soft", hexToRgba(accent, 0.12));
     return node;
   }
 
@@ -655,7 +733,7 @@
     node.root.classList.toggle("solved", lane.status === "solved");
     node.root.classList.toggle("errored", lane.status === "error" || lane.status === "unsolved");
     node.model.textContent = lane.model;
-    node.provider.textContent = `${LANE_LABELS[kind] || kind} · ${lane.provider}`;
+    node.provider.textContent = `${laneLabel(kind, lane)} · ${lane.provider}`;
     node.status.className = `status-pill status-${lane.status}`;
     node.status.textContent = STATUS_LABELS[lane.status] || lane.status;
 
@@ -671,7 +749,8 @@
       node.feed.textContent = `error · ${lane.error}`;
     } else if (lane.status === "solved") {
       const pct = Number.isFinite(efficiency) ? `${Math.round(efficiency * 100)}%` : "—";
-      node.feed.textContent = `ruta verificada · ${lane.solution?.steps ?? stats.steps ?? 0} pasos · eficiencia ${pct}`;
+      const limited = stats.rate_limited ? " · heurística por límite" : "";
+      node.feed.textContent = `ruta verificada · ${lane.solution?.steps ?? stats.steps ?? 0} pasos · eficiencia ${pct}${limited}`;
     } else if (lane.status === "unsolved") {
       node.feed.textContent = lane.verification?.error || "sin ruta verificada";
     } else if (lane.status === "cancelled") {
@@ -714,61 +793,69 @@
       container.innerHTML = "";
       return;
     }
-    const lanes = ["text", "decisions", "baseline"]
-      .map((kind) => ({ kind, lane: race.lanes[kind] }))
-      .filter((item) => item.lane);
-    const eligible = lanes.filter((item) => ["text", "decisions"].includes(item.kind));
-    const solved = eligible.filter((item) => item.lane.status === "solved" && item.lane.elapsed_ms != null);
+    const entries = Object.entries(race.lanes).map(([key, lane]) => ({ key, lane }));
+    if (!entries.length) {
+      container.innerHTML = "";
+      return;
+    }
+    const eligible = entries.filter((item) => item.lane.kind !== "baseline");
+    const solved = eligible
+      .filter((item) => item.lane.status === "solved" && item.lane.elapsed_ms != null)
+      .sort((a, b) => a.lane.elapsed_ms - b.lane.elapsed_ms);
     const winner = race.winner;
+    const winnerEntry = entries.find((item) => item.key === winner);
 
     let title = "Carrera en curso";
     let mark = "…";
     let cls = "";
-    let sub = "ambos carriles compitiendo";
-    if (winner === "text") {
-      title = "Gana el carril de texto";
-      mark = "T";
-      cls = "win-text";
-      sub = `${escapeHtml(race.lanes.text.model)} · ${formatMs(race.lanes.text.elapsed_ms)}`;
-    } else if (winner === "decisions") {
-      title = "Gana el carril de decisiones";
-      mark = "D";
-      cls = "win-decisions";
-      sub = `${escapeHtml(race.lanes.decisions.model)} · ${formatMs(race.lanes.decisions.elapsed_ms)}`;
-    } else if (winner === "tie") {
+    let sub = `${eligible.length} carriles compitiendo`;
+    if (winner === "tie") {
       title = "Empate técnico";
       mark = "=";
       cls = "win-tie";
-      sub = "ambos carriles resueltos";
+      sub = "rutas verificadas en el mismo instante";
+    } else if (winnerEntry) {
+      title = `Gana ${laneLabel(winnerEntry.key, winnerEntry.lane)}`;
+      mark = laneGlyph(winnerEntry.key, winnerEntry.lane);
+      cls = winnerEntry.lane.kind === "decisions" ? "win-decisions" : "win-text";
+      sub = `${escapeHtml(winnerEntry.lane.model)} · ${formatMs(winnerEntry.lane.elapsed_ms)}`;
     } else if (race.status === "done") {
       title = "Sin ganador";
       mark = "×";
       sub = "ningún carril verificó una ruta";
     } else if (solved.length === 1) {
-      title = `${LANE_LABELS[solved[0].kind] || solved[0].kind} ya tiene ruta`;
-      mark = LANE_GLYPHS[solved[0].kind] || "·";
-      cls = solved[0].kind === "decisions" ? "win-decisions" : "win-text";
-      sub = `${formatMs(solved[0].lane.elapsed_ms)} · esperando al otro carril`;
+      const only = solved[0];
+      title = `${laneLabel(only.key, only.lane)} ya tiene ruta`;
+      mark = laneGlyph(only.key, only.lane);
+      cls = only.lane.kind === "decisions" ? "win-decisions" : "win-text";
+      sub = `${formatMs(only.lane.elapsed_ms)} · esperando al resto`;
     }
 
     let deltaText = "";
-    if (solved.length === 2) {
-      const diff = Math.abs(solved[0].lane.elapsed_ms - solved[1].lane.elapsed_ms);
-      const speedup =
-        solved[0].lane.elapsed_ms > 0 && solved[1].lane.elapsed_ms > 0
-          ? Math.max(solved[0].lane.elapsed_ms, solved[1].lane.elapsed_ms) / Math.min(solved[0].lane.elapsed_ms, solved[1].lane.elapsed_ms)
-          : null;
+    if (solved.length >= 2) {
+      const first = solved[0].lane.elapsed_ms;
+      const second = solved[1].lane.elapsed_ms;
+      const diff = Math.abs(second - first);
+      const speedup = first > 0 && second > 0 ? Math.max(first, second) / Math.min(first, second) : null;
       deltaText = ` · Δ ${formatMs(diff)}${speedup ? ` · ×${speedup.toFixed(2)}` : ""}`;
     }
 
-    const rows = lanes
-      .map(({ kind, lane }) => {
+    const maxMs = Math.max(
+      ...entries.map((item) => item.lane.elapsed_ms || liveElapsed(item.lane) || 1),
+      1,
+    );
+    const rows = entries
+      .map(({ key, lane }) => {
         const ms = lane.elapsed_ms != null ? lane.elapsed_ms : liveElapsed(lane);
         const steps = lane.solution?.steps ?? lane.stats?.steps ?? 0;
         const efficiency = lane.solution?.efficiency;
         const finiteMs = Number.isFinite(ms) ? ms : 0;
-        const maxMs = Math.max(...lanes.map((item) => item.lane.elapsed_ms || liveElapsed(item.lane) || 1), 1);
-        const width = lane.status === "solved" ? clamp((finiteMs / maxMs) * 100, 5, 100) : lane.status === "running" ? clamp((finiteMs / maxMs) * 100, 8, 100) : 3;
+        const width =
+          lane.status === "solved"
+            ? clamp((finiteMs / maxMs) * 100, 5, 100)
+            : lane.status === "running"
+              ? clamp((finiteMs / maxMs) * 100, 8, 100)
+              : 3;
         const statusText =
           lane.status === "solved"
             ? `${formatMs(finiteMs)} · ${steps} pasos${Number.isFinite(efficiency) ? ` · ${Math.round(efficiency * 100)}%` : ""}`
@@ -776,8 +863,8 @@
               ? `${formatMs(finiteMs)} · en curso`
               : STATUS_LABELS[lane.status] || lane.status;
         return `
-          <div class="compare-row" style="--accent:${LANE_COLORS[kind] || "#8891a3"}">
-            <span class="compare-name">${LANE_LABELS[kind] || kind}</span>
+          <div class="compare-row" style="--accent:${laneAccent(key, lane)}">
+            <span class="compare-name">${escapeHtml(laneLabel(key, lane))}</span>
             <div class="compare-bar-shell"><div class="compare-bar" style="width:${width}%"></div></div>
             <span class="compare-value">${statusText}</span>
           </div>`;
@@ -786,7 +873,7 @@
 
     container.innerHTML = `
       <div class="winner-line">
-        <div class="winner-title ${cls}"><span class="winner-mark">${mark}</span><span>${title}</span></div>
+        <div class="winner-title ${cls}"><span class="winner-mark">${mark}</span><span>${escapeHtml(title)}</span></div>
         <div class="winner-sub">${sub}${deltaText}</div>
       </div>
       <div class="compare-rows">${rows}</div>`;
@@ -806,11 +893,17 @@
     }
     const entries = [];
     for (const event of race.events || []) {
-      entries.push({ at: event.at, kind: "race", message: event.message });
+      entries.push({ at: event.at, kind: "race", label: "race", accent: null, message: event.message });
     }
-    for (const [kind, lane] of Object.entries(race.lanes)) {
+    for (const [key, lane] of Object.entries(race.lanes)) {
       for (const entry of (lane.trace || []).slice(-18)) {
-        entries.push({ at: entry.at, kind, message: entry.message });
+        entries.push({
+          at: entry.at,
+          kind: key,
+          label: laneLabel(key, lane),
+          accent: laneAccent(key, lane),
+          message: entry.message,
+        });
       }
     }
     entries.sort((a, b) => String(a.at).localeCompare(String(b.at)));
@@ -831,8 +924,9 @@
       time.className = "log-time";
       time.textContent = formatClock(entry.at);
       const tag = document.createElement("span");
-      tag.className = `log-tag ${entry.kind}`;
-      tag.textContent = entry.kind === "race" ? "race" : LANE_LABELS[entry.kind] || entry.kind;
+      tag.className = entry.kind === "race" ? "log-tag race" : "log-tag";
+      if (entry.accent) tag.style.color = entry.accent;
+      tag.textContent = entry.label || entry.kind;
       const message = document.createElement("span");
       message.className = "log-message";
       message.textContent = entry.message;
@@ -878,34 +972,57 @@
     return [geo.cx(pos[0]), geo.cy(pos[1])];
   }
 
+  function mazeWalls(maze) {
+    if (Array.isArray(maze.walls)) return maze.walls;
+    if (!maze || typeof maze.walls !== "string") return [];
+    const key = `${maze.width}x${maze.height}:${maze.seed}:${maze.walls.length}`;
+    if (state.wallCache.has(key)) return state.wallCache.get(key);
+    try {
+      const binary = atob(maze.walls);
+      const expected = maze.width * maze.height;
+      const walls = new Array(expected);
+      for (let index = 0; index < expected; index += 1) {
+        const byte = binary.charCodeAt(index >> 1);
+        walls[index] = index % 2 === 0 ? byte & 15 : (byte >> 4) & 15;
+      }
+      if (state.wallCache.size > 8) state.wallCache.clear();
+      state.wallCache.set(key, walls);
+      return walls;
+    } catch (error) {
+      return [];
+    }
+  }
+
   function drawWalls(ctx, maze, geo, color) {
     const { cell, ox, oy } = geo;
+    const walls = mazeWalls(maze);
+    if (!walls.length) return;
     ctx.beginPath();
     for (let y = 0; y < maze.height; y += 1) {
       for (let x = 0; x < maze.width; x += 1) {
-        const walls = maze.walls[y * maze.width + x];
+        const cellWalls = walls[y * maze.width + x];
         const left = ox + x * cell;
         const top = oy + y * cell;
-        if (walls & 1) {
+        if (cellWalls & 1) {
           ctx.moveTo(left, top);
           ctx.lineTo(left + cell, top);
         }
-        if (walls & 8) {
+        if (cellWalls & 8) {
           ctx.moveTo(left, top);
           ctx.lineTo(left, top + cell);
         }
-        if (x === maze.width - 1 && walls & 2) {
+        if (x === maze.width - 1 && cellWalls & 2) {
           ctx.moveTo(left + cell, top);
           ctx.lineTo(left + cell, top + cell);
         }
-        if (y === maze.height - 1 && walls & 4) {
+        if (y === maze.height - 1 && cellWalls & 4) {
           ctx.moveTo(left, top + cell);
           ctx.lineTo(left + cell, top + cell);
         }
       }
     }
     ctx.strokeStyle = color;
-    ctx.lineWidth = Math.max(1, cell * 0.08);
+    ctx.lineWidth = Math.max(0.35, Math.min(1, cell * 0.08));
     ctx.lineCap = "square";
     ctx.stroke();
   }
@@ -943,7 +1060,7 @@
   function drawGoal(ctx, maze, geo, accent, now, solved) {
     const [gx, gy] = pointFor(maze.goal, geo);
     const pulse = 0.5 + 0.5 * Math.sin(now / 430);
-    const radius = geo.cell * (0.24 + 0.035 * pulse);
+    const radius = Math.max(geo.cell < 3 ? 3.8 : 2.4, geo.cell * (0.24 + 0.035 * pulse));
     ctx.save();
     ctx.translate(gx, gy);
     ctx.rotate(Math.PI / 4);
@@ -964,12 +1081,12 @@
     ctx.strokeStyle = hexToRgba(accent, 0.75);
     ctx.lineWidth = Math.max(1, geo.cell * 0.07);
     ctx.beginPath();
-    ctx.arc(sx, sy, geo.cell * 0.18, 0, Math.PI * 2);
+    ctx.arc(sx, sy, Math.max(1.6, geo.cell * 0.18), 0, Math.PI * 2);
     ctx.stroke();
   }
 
   function drawAgent(ctx, geo, accent, x, y, now, moving) {
-    const radius = geo.cell * 0.26;
+    const radius = Math.max(geo.cell < 3 ? 3.2 : 2.2, geo.cell * 0.26);
     const pulse = 0.5 + 0.5 * Math.sin(now / 280);
     ctx.save();
     ctx.shadowColor = accent;
@@ -1017,7 +1134,7 @@
     if (!fit) return;
     const { ctx, width, height } = fit;
     const maze = race.maze;
-    const accent = LANE_COLORS[kind] || "#8891a3";
+    const accent = laneAccent(kind, lane);
     ctx.clearRect(0, 0, width, height);
 
     const padding = Math.max(8, Math.min(width, height) * 0.035);
@@ -1025,24 +1142,72 @@
 
     const optimal = race.ground_truth?.solution || maze.solution;
     if ($("#show-optimal").checked && optimal) {
-      strokePath(ctx, optimal, maze, geo, "rgba(57,214,157,0.18)", geo.cell * 0.12, [geo.cell * 0.16, geo.cell * 0.24]);
+      strokePath(
+        ctx,
+        optimal,
+        maze,
+        geo,
+        "rgba(57,214,157,0.18)",
+        Math.max(0.7, geo.cell * 0.12),
+        [Math.max(0.9, geo.cell * 0.16), Math.max(1.1, geo.cell * 0.24)],
+      );
     }
 
     drawVisited(ctx, lane, maze, geo, accent);
 
+    const dense = geo.cell < 3;
     if (lane.trail && lane.trail.length > 1) {
-      strokePath(ctx, lane.trail, maze, geo, hexToRgba(accent, 0.2), geo.cell * 0.1);
+      strokePath(
+        ctx,
+        lane.trail,
+        maze,
+        geo,
+        hexToRgba(accent, 0.24),
+        dense ? Math.max(0.9, geo.cell * 0.22) : Math.max(0.6, geo.cell * 0.1),
+      );
     }
 
     const slice = pathSlice(lane, maze, now);
-    strokePath(ctx, slice.points, maze, geo, hexToRgba(accent, 0.85), geo.cell * 0.16);
+    strokePath(
+      ctx,
+      slice.points,
+      maze,
+      geo,
+      hexToRgba(accent, 0.88),
+      dense ? Math.max(1.5, geo.cell * 0.4) : Math.max(1.1, geo.cell * 0.16),
+    );
     ctx.save();
     ctx.shadowColor = accent;
     ctx.shadowBlur = 12;
-    strokePath(ctx, slice.points, maze, geo, hexToRgba(accent, 0.45), geo.cell * 0.075);
+    strokePath(
+      ctx,
+      slice.points,
+      maze,
+      geo,
+      hexToRgba(accent, 0.45),
+      dense ? Math.max(0.8, geo.cell * 0.2) : Math.max(0.6, geo.cell * 0.075),
+    );
     ctx.restore();
 
-    drawWalls(ctx, maze, geo, "rgba(139,151,170,0.5)");
+    const dpr = node.canvas.width / width || 1;
+    const wallKey = `${maze.width}x${maze.height}:${maze.seed}:${Math.round(width)}x${Math.round(height)}:${dpr.toFixed(2)}:${maze.walls?.length ?? 0}`;
+    if (node.wallKey !== wallKey) {
+      const layer = node.wallLayer || document.createElement("canvas");
+      layer.width = node.canvas.width;
+      layer.height = node.canvas.height;
+      const layerCtx = layer.getContext("2d");
+      layerCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      layerCtx.clearRect(0, 0, width, height);
+      drawWalls(
+        layerCtx,
+        maze,
+        geo,
+        geo.cell < 3 ? "rgba(139,151,170,0.12)" : "rgba(139,151,170,0.5)",
+      );
+      node.wallLayer = layer;
+      node.wallKey = wallKey;
+    }
+    ctx.drawImage(node.wallLayer, 0, 0, width, height);
     drawStart(ctx, maze, geo, accent);
     drawGoal(ctx, maze, geo, accent, now, lane.status === "solved");
 
@@ -1080,8 +1245,22 @@
     ctx.clearRect(0, 0, width, height);
     const padding = Math.max(8, Math.min(width, height) * 0.055);
     const geo = geometry(width, height, maze.width, maze.height, padding);
-    strokePath(ctx, maze.solution, maze, geo, "rgba(245,165,36,0.32)", geo.cell * 0.13, [geo.cell * 0.16, geo.cell * 0.24]);
-    drawWalls(ctx, maze, geo, "rgba(139,151,170,0.52)");
+    strokePath(
+      ctx,
+      maze.solution,
+      maze,
+      geo,
+      "rgba(245,165,36,0.42)",
+      Math.max(0.9, geo.cell * 0.16),
+      geo.cell >= 2.5 ? [Math.max(0.9, geo.cell * 0.16), Math.max(1.1, geo.cell * 0.24)] : null,
+    );
+    if (geo.cell >= 2.5) {
+      drawWalls(ctx, maze, geo, "rgba(139,151,170,0.35)");
+    } else {
+      ctx.strokeStyle = "rgba(139,151,170,0.35)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(geo.ox, geo.oy, geo.cell * maze.width, geo.cell * maze.height);
+    }
     drawStart(ctx, maze, geo, "#f5a524");
     drawGoal(ctx, maze, geo, "#f5a524", performance.now(), false);
   }
@@ -1156,6 +1335,7 @@
     $("#present-exit").addEventListener("click", exitPresent);
     $("#present-fullscreen").addEventListener("click", toggleFullscreen);
     $("#refresh-history").addEventListener("click", loadHistory);
+    $("#race-mode").addEventListener("change", applyModeUI);
     $("#new-maze").addEventListener("click", () => {
       $("#seed").value = Math.floor(Math.random() * 2147483647);
       loadMazePreview();
@@ -1199,6 +1379,7 @@
     const params = new URLSearchParams(window.location.search);
     if (params.get("present") === "1") enterPresent(false);
     await Promise.allSettled([loadBootstrap(), loadMazePreview(), loadHistory()]);
+    applyModeUI();
     const raceId = params.get("race");
     if (raceId) {
       await loadArchivedRace(raceId);

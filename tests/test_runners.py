@@ -155,6 +155,17 @@ async def test_decisions_lane_backtracks_out_of_a_wrong_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_text_lane_rejects_mazes_above_the_prompt_limit() -> None:
+    maze = generate_maze(255, 255, 42)
+    config = RaceConfig.from_dict({"width": 255, "height": 255, "seed": 42, "mode": "versus"})
+    lane = new_lane("text", config.text_model, "Nam", maze.start)
+    await run_text_lane(config, maze, lane, len(shortest_path(maze)) - 1)
+    assert lane["status"] == "unsolved"
+    assert "solo admite" in (lane["verification"]["error"] or "")
+    assert lane["calls"] == 0
+
+
+@pytest.mark.asyncio
 async def test_heuristic_baseline_solves_without_calls() -> None:
     maze = generate_maze(9, 9, 42)
     config = RaceConfig.from_dict(
